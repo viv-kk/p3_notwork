@@ -237,6 +237,7 @@ AgentConfig AgentConfig::loadFromFile(const string& config_path) {
 
 
 HashMap<string, size_t> LogCollector::file_positions;
+HashMap<string, string> LogCollector::file_inodes;
 
 LogCollector::LogCollector(const string& name, const string& path, const string& pat) 
     : source_name(name), log_path(path), pattern(pat), inotify_fd(-1), watch_fd(-1) {
@@ -334,9 +335,21 @@ Vector<SecurityEvent> LogCollector::collectNewEvents() {
         last_position = 0;
     }
     
-    // ИСПРАВЛЕНИЕ: правильная проверка ротации логов
-    if ((size_t)st.st_size < last_position) {
+    // Получаем inode файла
+    string current_inode = to_string(st.st_ino);
+    string saved_inode;
+    file_inodes.get(position_key, saved_inode);
+    
+    // Проверяем, изменился ли inode (файл был пересоздан)
+    if (!saved_inode.empty() && current_inode != saved_inode) {
         cout << "Log rotation detected for " << log_path 
+             << ", inode changed from " << saved_inode << " to " << current_inode << endl;
+        last_position = 0; // Сбрасываем позицию при ротации файла
+    }
+    
+    // Также проверяем, не уменьшился ли размер файла (файл был обрезан)
+    if ((size_t)st.st_size < last_position) {
+        cout << "Log truncation detected for " << log_path 
              << ", resetting position to 0" << endl;
         last_position = 0;
     }
@@ -365,12 +378,12 @@ Vector<SecurityEvent> LogCollector::collectNewEvents() {
     }
     
     if (lines_read > 0) {
-        // ИСПРАВЛЕНИЕ: правильно получаем новую позицию
         last_position = log_file.tellg();
         if (last_position == -1) {
             last_position = st.st_size; // fallback
         }
         file_positions.put(position_key, last_position);
+        file_inodes.put(position_key, current_inode); // Сохраняем текущий inode
         savePosition();
         cout << "Collected " << lines_read << " lines from " << source_name 
              << ", new position: " << last_position << "/" << st.st_size << endl;
@@ -378,6 +391,7 @@ Vector<SecurityEvent> LogCollector::collectNewEvents() {
         // Если ничего не прочитали, но файл увеличился (пустые строки?)
         last_position = st.st_size;
         file_positions.put(position_key, last_position);
+        file_inodes.put(position_key, current_inode); // Сохраняем текущий inode
         savePosition();
     }
     
@@ -442,6 +456,18 @@ Vector<SecurityEvent> LogCollector::readFromSpecificPath(const string& specific_
         last_position = 0;
     }
     
+    // Получаем inode файла
+    string current_inode = to_string(st.st_ino);
+    string saved_inode;
+    file_inodes.get(position_key, saved_inode);
+    
+    // Проверяем, изменился ли inode (файл был пересоздан)
+    if (!saved_inode.empty() && current_inode != saved_inode) {
+        cout << "Log rotation detected for " << specific_path 
+             << ", inode changed from " << saved_inode << " to " << current_inode << endl;
+        last_position = 0; // Сбрасываем позицию при ротации файла
+    }
+    
     if (last_position > (size_t)st.st_size) {
         last_position = 0;
     }
@@ -465,7 +491,11 @@ Vector<SecurityEvent> LogCollector::readFromSpecificPath(const string& specific_
     
     if (lines_read > 0) {
         last_position = log_file.tellg();
+        if (last_position == -1) {
+            last_position = st.st_size; // fallback
+        }
         file_positions.put(position_key, last_position);
+        file_inodes.put(position_key, current_inode); // Сохраняем текущий inode
         savePosition();
     }
     
@@ -478,9 +508,21 @@ bool LogCollector::savePosition() {
     JsonParser parser;
     HashMap<string, string> position_map;
     
+    // Сохраняем позиции файлов
     auto items = file_positions.items();
     for (size_t i = 0; i < items.size(); i++) {
-        position_map.put(items[i].first, to_string(items[i].second));
+        string key = items[i].first;
+        size_t position = items[i].second;
+        
+        // Получаем соответствующий inode для этой позиции
+        string inode;
+        file_inodes.get(key, inode);
+        
+        // Формируем ключ для сохранения в JSON: "filename:position:inode"
+        string save_key = key + ":pos";
+        string save_value = to_string(position) + ":" + inode;
+        
+        position_map.put(save_key, save_value);
     }
     
     string pos_file = "/tmp/siem_positions.json";
@@ -522,11 +564,38 @@ bool LogCollector::loadPosition() {
             
             auto items = position_map.items();
             for (size_t i = 0; i < items.size(); i++) {
-                try {
-                    size_t pos = stoull(items[i].second);
-                    file_positions.put(items[i].first, pos);
-                } catch (...) {
-                    file_positions.put(items[i].first, 0);
+                string key = items[i].first;
+                string value = items[i].second;
+                
+                // Проверяем, является ли это ключом позиции файла
+                if (key.find(":pos") != string::npos) {
+                    // Извлекаем оригинальный ключ (без ":pos")
+                    string original_key = key.substr(0, key.length() - 4);
+                    
+                    // Разбиваем значение на позицию и inode
+                    size_t colon_pos = value.find(':');
+                    if (colon_pos != string::npos) {
+                        string position_str = value.substr(0, colon_pos);
+                        string inode = value.substr(colon_pos + 1);
+                        
+                        try {
+                            size_t pos = stoull(position_str);
+                            file_positions.put(original_key, pos);
+                            
+                            if (!inode.empty()) {
+                                file_inodes.put(original_key, inode);
+                            }
+                        } catch (...) {
+                            file_positions.put(original_key, 0);
+                        }
+                    } else {
+                        try {
+                            size_t pos = stoull(value);
+                            file_positions.put(original_key, pos);
+                        } catch (...) {
+                            file_positions.put(original_key, 0);
+                        }
+                    }
                 }
             }
             
@@ -537,6 +606,33 @@ bool LogCollector::loadPosition() {
     }
     
     return false;
+}
+
+bool LogCollector::handleFileRotation(const std::string& path) {
+    string position_key = source_name + "_" + path;
+    
+    // Сбрасываем позицию файла
+    file_positions.put(position_key, 0);
+    
+    // Удаляем старый inode
+    file_inodes.remove(position_key);
+    
+    cout << "Handled file rotation for " << path << endl;
+    return true;
+}
+
+void LogCollector::updateFilePosition(const std::string& path, size_t position) {
+    string position_key = source_name + "_" + path;
+    file_positions.put(position_key, position);
+    
+    // Обновляем inode файла
+    struct stat st;
+    if (stat(path.c_str(), &st) == 0) {
+        string inode = to_string(st.st_ino);
+        file_inodes.put(position_key, inode);
+    }
+    
+    savePosition();
 }
 
 SIEMAgent::SIEMAgent(const string& config_path) 
@@ -643,91 +739,20 @@ void SIEMAgent::sendEventsToDB(const Vector<SecurityEvent>& events) {
     req.collection = config.collection;
     
     // Добавляем события
-    for (size_t i = 0; i < events.size() && i < 3; i++) { // Сначала только 3
+    for (size_t i = 0; i < events.size(); i++) {
         SecurityEvent event = events[i];
         
         // Используем встроенный метод toJson()
         string event_json = event.toJson();
         
         // Проверяем, что JSON валиден
-        cout << "  Event " << i << " JSON (" << event_json.length() << " bytes): ";
-        cout << event_json.substr(0, min(event_json.length(), 100ul)) << "..." << endl;
-        
-        // Проверяем экранирование кавычек
-        size_t quote_count = 0;
-        size_t escaped_quote_count = 0;
-        for (size_t pos = 0; pos < event_json.length(); pos++) {
-            if (event_json[pos] == '"') {
-                quote_count++;
-                if (pos > 0 && event_json[pos-1] == '\\') {
-                    escaped_quote_count++;
-                }
-            }
+        if (i < 3) { // Показываем только первые 3 для отладки
+            cout << "  Event " << i << " JSON (" << event_json.length() << " bytes): ";
+            cout << event_json.substr(0, min(event_json.length(), 100ul)) << "..." << endl;
         }
-        cout << "    Quotes: " << quote_count << ", Escaped: " << escaped_quote_count << endl;
         
         req.data.push_back(event_json);
     }
-    
-    // ДЕБАГ: выведем полный запрос
-    cout << "\nDEBUG: Full Request:" << endl;
-    string request_json = req.toJson();
-    
-    // Проверим весь JSON на проблемы
-    cout << "Request size: " << request_json.length() << " bytes" << endl;
-    
-    // Проверим баланс кавычек
-    int balance = 0;
-    bool in_string = false;
-    bool escaped = false;
-    
-    for (size_t i = 0; i < request_json.length() && i < 1000; i++) {
-        char c = request_json[i];
-        
-        if (escaped) {
-            escaped = false;
-            continue;
-        }
-        
-        if (c == '\\') {
-            escaped = true;
-            continue;
-        }
-        
-        if (c == '"') {
-            if (!in_string) {
-                in_string = true;
-            } else {
-                in_string = false;
-            }
-        }
-    }
-    
-    int quote_balance = 0;
-    bool in_escape = false;
-    for (size_t i = 0; i < request_json.length(); i++) {
-        char c = request_json[i];
-        
-        if (in_escape) {
-            in_escape = false;
-            continue;
-        }
-        
-        if (c == '\\') {
-            in_escape = true;
-            continue;
-        }
-        
-        if (c == '"') {
-            quote_balance++;
-        }
-    }
-
-    cout << "JSON check - quote balance: " << quote_balance 
-        << " (should be even, " << (quote_balance % 2 == 0 ? "GOOD" : "BAD") << ")" << endl;
-    
-    cout << "First 600 chars:" << endl;
-    cout << request_json.substr(0, min(request_json.length(), 600ul)) << "..." << endl;
     
     // Отправляем
     Response response = db_client->sendRequest(req);
@@ -737,9 +762,10 @@ void SIEMAgent::sendEventsToDB(const Vector<SecurityEvent>& events) {
          << ", Count: " << response.count << endl;
     
     if (response.status == "success") {
-        logMessage("Sent " + to_string(min(events.size(), 3ul)) + " events to DB");
+        logMessage("Sent " + to_string(events.size()) + " events to DB");
     } else {
         logMessage("Send error: " + response.message, "ERROR");
+        // Сохраняем события в буфер на диске при ошибке отправки
         buffer->addEvents(events);
     }
     
@@ -878,6 +904,16 @@ void SIEMAgent::monitoringLoop() {
                     );
                     
                     if (!processed.source.empty()) {
+                        // Добавляем отладочную информацию
+                        if (processed.timestamp.empty()) {
+                            // Устанавливаем текущее время, если оно не задано
+                            auto now = std::chrono::system_clock::now();
+                            auto time_t_now = std::chrono::system_clock::to_time_t(now);
+                            std::stringstream ss;
+                            ss << std::put_time(std::localtime(&time_t_now), "%Y-%m-%d %H:%M:%S");
+                            processed.timestamp = ss.str();
+                        }
+                        
                         buffer->addEvent(processed);
                     }
                 }

@@ -57,6 +57,7 @@ private:
     int inotify_fd;
     int watch_fd;
     static HashMap<std::string, size_t> file_positions;
+    static HashMap<std::string, std::string> file_inodes; // Добавляем отслеживание inode
     
 public:
     LogCollector(const std::string& name, const std::string& path, const std::string& pattern = "");
@@ -70,8 +71,10 @@ public:
 private:
     bool loadPosition();
     bool savePosition();
-    Vector<SecurityEvent> readFromSpecificPath(const std::string& specific_path);  // <-- ДОБАВЬТЕ
+    Vector<SecurityEvent> readFromSpecificPath(const std::string& specific_path);
     Vector<std::string> expandPathPattern();
+    bool handleFileRotation(const std::string& path); // Добавляем обработку ротации файлов
+    void updateFilePosition(const std::string& path, size_t position); // Обновляем позицию файла
 };
 
 class SIEMAgent {
