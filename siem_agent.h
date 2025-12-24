@@ -29,7 +29,7 @@ struct AgentConfig {
     HashMap<std::string, std::string> source_paths;
     Vector<std::string> exclude_patterns;
     std::string persistent_buffer_path;
-    
+
     static AgentConfig loadFromFile(const std::string& config_path);
 };
 
@@ -44,7 +44,7 @@ struct SecurityEvent {
     std::string command;
     std::string raw_log;
     std::string agent_id;
-    
+
     std::string toJson() const;
     HashMap<std::string, std::string> toHashMap() const;
 };
@@ -57,21 +57,24 @@ private:
     int inotify_fd;
     int watch_fd;
     static HashMap<std::string, size_t> file_positions;
-    
+    static HashMap<std::string, std::string> file_inodes; // Добавляем отслеживание inode
+
 public:
     LogCollector(const std::string& name, const std::string& path, const std::string& pattern = "");
     ~LogCollector();
-    
+
     Vector<SecurityEvent> collectNewEvents();
     bool setupInotify();
     bool checkForChanges();
     std::string getSourceName() const { return source_name; }
-    
+
 private:
     bool loadPosition();
     bool savePosition();
-    Vector<SecurityEvent> readFromSpecificPath(const std::string& specific_path);  // <-- ДОБАВЬТЕ
+    Vector<SecurityEvent> readFromSpecificPath(const std::string& specific_path);
     Vector<std::string> expandPathPattern();
+    bool handleFileRotation(const std::string& path); // Добавляем обработку ротации файлов
+    void updateFilePosition(const std::string& path, size_t position); // Обновляем позицию файла
 };
 
 class SIEMAgent {
@@ -87,16 +90,16 @@ private:
     std::condition_variable cv;
     std::mutex cv_mutex;
     bool stop_requested;
-    
+
 public:
     SIEMAgent(const std::string& config_path);
     ~SIEMAgent();
-    
+
     bool start();
     void stop();
     void run();
-    
-private: 
+
+private:
     void initializeCollectors();
     bool connectToDB();
     void sendEventsToDB(const Vector<SecurityEvent>& events);
