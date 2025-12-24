@@ -1,0 +1,22 @@
+{
+  "server_host": "127.0.0.1",
+  "server_port": 8080,
+  "database": "security_db",
+  "collection": "security_events",
+  "agent_id": "real-agent-01",
+  "log_file": "/tmp/siem_agent.log",
+  "send_interval": 30,
+  "batch_size": 100,
+  "max_buffer_size": 1000,
+  "persistent_buffer_path": "/tmp/siem_buffer",
+  "sources": [
+    {"name": "auditd", "path": "/var/log/audit/audit.log"},
+    {"name": "syslog", "path": "/var/log/syslog"},
+    {"name": "auth", "path": "/var/log/auth.log"},
+    {"name": "bash_history", "path": "/home/*/.bash_history"}
+  ],
+  "exclude_patterns": [
+    {"pattern": "DEBUG"},
+    {"pattern": "CRON"}
+  ]
+}
